@@ -82,7 +82,7 @@ public class Tuple implements Serializable {
      */
     public void setField(int i, Field f) {
         // some code goes here
-        this.fields.set(i, f);
+        this.fields.add(i, f); // 这里在整体设计上是使用add，但是函数描述有问题，故之前写成了set
     }
 
     /**
