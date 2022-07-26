@@ -83,6 +83,12 @@ public class BufferPool {
         throws TransactionAbortedException, DbException {
         // some code goes here
         // Lab 1 version
+//        return this.pageCache.get(pid);
+        if (!pageCache.containsKey(pid)) {
+            DbFile file = Database.getCatalog().getDatabaseFile(pid.getTableId());
+            Page page = file.readPage(pid);
+            pageCache.put(pid, page);
+        }
         return this.pageCache.get(pid);
     }
 
