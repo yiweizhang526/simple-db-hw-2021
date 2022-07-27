@@ -33,6 +33,7 @@ public class Project extends Operator {
 
     public Project(List<Integer> fieldList, Type[] types,
                    OpIterator child) {
+        // 构造函数这里是先得到project后的tupleDesc
         this.child = child;
         outFieldIds = fieldList;
         String[] fieldAr = new String[fieldList.size()];
@@ -71,6 +72,7 @@ public class Project extends Operator {
      */
     protected Tuple fetchNext() throws NoSuchElementException,
             TransactionAbortedException, DbException {
+        // 这里是根据project后的tupleDesc，从原始next tuple中提取出相应的field
         if (!child.hasNext()) return null;
         Tuple t = child.next();
         Tuple newTuple = new Tuple(td);
