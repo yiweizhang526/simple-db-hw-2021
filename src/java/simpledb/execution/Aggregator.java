@@ -1,7 +1,6 @@
 package simpledb.execution;
 
-import simpledb.storage.Tuple;
-import simpledb.storage.TupleIterator;
+import simpledb.storage.*;
 
 import java.io.Serializable;
 
@@ -11,6 +10,10 @@ import java.io.Serializable;
  */
 public interface Aggregator extends Serializable {
     int NO_GROUPING = -1;
+
+    Field EMPTY_FIELD = new EmptyField();
+
+    TupleDesc getTupleDesc();
 
     /**
      * SUM_COUNT and SC_AVG will
