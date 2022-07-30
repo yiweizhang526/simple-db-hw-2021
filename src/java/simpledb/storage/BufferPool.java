@@ -154,6 +154,13 @@ public class BufferPool {
         throws DbException, IOException, TransactionAbortedException {
         // some code goes here
         // not necessary for lab1
+        HeapFile heapFile = (HeapFile) Database.getCatalog().getDatabaseFile(tableId);
+        if (heapFile == null) {
+            throw new DbException("BufferPool.insertTuple()中 tableId : " + tableId + " 的表不存在");
+        }
+        for (Page page: heapFile.insertTuple(tid, t)) {
+            pageCache.put(page.getId(), page);
+        }
     }
 
     /**
@@ -173,6 +180,13 @@ public class BufferPool {
         throws DbException, IOException, TransactionAbortedException {
         // some code goes here
         // not necessary for lab1
+        HeapFile heapFile = (HeapFile) Database.getCatalog().getDatabaseFile(t.getRecordId().getPageId().getTableId());
+        if (heapFile == null) {
+            throw new DbException("BufferPool.deleteTuple()中 tableId : " + t.getRecordId().getPageId().getTableId() + " 的表不存在");
+        }
+        for (Page page : heapFile.deleteTuple(tid, t)) {
+            pageCache.put(page.getId(), page);    // 修改后的页要覆盖缓冲池中的页
+        }
     }
 
     /**
