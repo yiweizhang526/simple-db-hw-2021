@@ -6,9 +6,12 @@ import simpledb.common.DbException;
 import simpledb.common.DeadlockException;
 import simpledb.transaction.TransactionAbortedException;
 import simpledb.transaction.TransactionId;
+//import simpledb.storage.evict.EvictStrategy;
+import simpledb.storage.evict.LRUStrategy;
 
 import java.io.*;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -35,8 +38,8 @@ public class BufferPool {
     public static final int DEFAULT_PAGES = 50;
 
     private Integer numPages;
-    private Map<PageId, Page> pageCache;
-//    private EvictStrategy evict;
+    private Map<PageId, LRUStrategy.LinkedNode> pageCache;
+    private LRUStrategy evict;
 //    private LockManager lockManager;
 
     /**
@@ -48,10 +51,11 @@ public class BufferPool {
         // some code goes here
         this.numPages = numPages;
         this.pageCache = new ConcurrentHashMap<>();
+        this.evict = new LRUStrategy(numPages);
     }
     
     public static int getPageSize() {
-      return pageSize;
+        return pageSize;
     }
     
     // THIS FUNCTION SHOULD ONLY BE USED FOR TESTING!!
@@ -79,7 +83,7 @@ public class BufferPool {
      * @param pid the ID of the requested page
      * @param perm the requested permissions on the page
      */
-    public  Page getPage(TransactionId tid, PageId pid, Permissions perm)
+    public Page getPage(TransactionId tid, PageId pid, Permissions perm)
         throws TransactionAbortedException, DbException {
         // some code goes here
         // Lab 1 version
@@ -87,9 +91,18 @@ public class BufferPool {
         if (!pageCache.containsKey(pid)) {
             DbFile file = Database.getCatalog().getDatabaseFile(pid.getTableId());
             Page page = file.readPage(pid);
-            pageCache.put(pid, page);
+            // 判断是否超过大小
+            if (pageCache.size() >= numPages) {
+                this.evictPage();
+            }
+            // 放入LRU 双向链表中
+            LRUStrategy.LinkedNode node = new LRUStrategy.LinkedNode(pid, page);
+            evict.addToHead(node);
+            pageCache.put(pid, node);
         }
-        return this.pageCache.get(pid);
+        // 移动到头部
+        evict.moveToHead(pageCache.get(pid));
+        return this.pageCache.get(pid).getPage();
     }
 
     /**
@@ -159,7 +172,16 @@ public class BufferPool {
             throw new DbException("BufferPool.insertTuple()中 tableId : " + tableId + " 的表不存在");
         }
         for (Page page: heapFile.insertTuple(tid, t)) {
-            pageCache.put(page.getId(), page);
+            // 如果缓存池已满，执行淘汰策略
+            if(pageCache.size() > numPages){
+                evictPage();
+            }
+            // 获取节点，此时的页一定已经在缓存了，因为刚刚被修改的时候就已经放入缓存了
+            LRUStrategy.LinkedNode node = pageCache.get(page.getId());
+            // 更新新的页内容
+            node.setPage(page);
+            pageCache.put(page.getId(), node);
+            page.markDirty(true, tid);
         }
     }
 
@@ -176,7 +198,7 @@ public class BufferPool {
      * @param tid the transaction deleting the tuple.
      * @param t the tuple to delete
      */
-    public  void deleteTuple(TransactionId tid, Tuple t)
+    public void deleteTuple(TransactionId tid, Tuple t)
         throws DbException, IOException, TransactionAbortedException {
         // some code goes here
         // not necessary for lab1
@@ -185,7 +207,12 @@ public class BufferPool {
             throw new DbException("BufferPool.deleteTuple()中 tableId : " + t.getRecordId().getPageId().getTableId() + " 的表不存在");
         }
         for (Page page : heapFile.deleteTuple(tid, t)) {
-            pageCache.put(page.getId(), page);    // 修改后的页要覆盖缓冲池中的页
+            // 获取节点，此时的页一定已经在缓存了，因为刚刚被修改的时候就已经放入缓存了
+            LRUStrategy.LinkedNode node = pageCache.get(page.getId());
+            // 更新新的页内容
+            node.setPage(page);
+            pageCache.put(page.getId(), node);    // 修改后的页要覆盖缓冲池中的页
+            page.markDirty(true, tid);
         }
     }
 
@@ -197,6 +224,12 @@ public class BufferPool {
     public synchronized void flushAllPages() throws IOException {
         // some code goes here
         // not necessary for lab1
+        for (Map.Entry<PageId, LRUStrategy.LinkedNode> entry : pageCache.entrySet()) {
+            Page page = entry.getValue().getPage();
+            if (page.isDirty() != null) {   // 判断是否是脏页
+                flushPage(page.getId());    // 脏页刷新
+            }
+        }
 
     }
 
@@ -211,31 +244,61 @@ public class BufferPool {
     public synchronized void discardPage(PageId pid) {
         // some code goes here
         // not necessary for lab1
+        pageCache.remove(pid);
     }
 
     /**
      * Flushes a certain page to disk
      * @param pid an ID indicating the page to flush
      */
-    private synchronized  void flushPage(PageId pid) throws IOException {
+    private synchronized void flushPage(PageId pid) throws IOException {
         // some code goes here
         // not necessary for lab1
+        Page page = pageCache.get(pid).getPage();
+        // 通过tableId找到对应的DbFile,并将page写入到对应的DbFile中
+        int tableId = pid.getTableId();
+        DbFile dbFile = Database.getCatalog().getDatabaseFile(tableId);
+
+        // append an update record to the log, with a before-image and after-image
+        TransactionId dirtyTid = page.isDirty();    // 脏的页，返回该页的事务id
+        if (dirtyTid != null) {
+            // 脏页刷盘前把日志写入磁盘先    // 反正页刷盘时crash，先把日志刷了先
+            Database.getLogFile().logWrite(dirtyTid, page.getBeforeImage(), page); // UPDATE记录的操作，保存before-image 和 after-image
+            Database.getLogFile().force();  // 强制刷盘，不用放在缓冲中
+        }
+        // 在调用writePage(flush)之前，在BufferPool.flushPage()中插入以下几行，其中flush是对被写入页面的引用。
+        // 这将导致日志系统向日志写入更新。
+        // 我们强迫日志在页面被写入磁盘之前确保日志记录在磁盘上。
+        // 将page刷新到磁盘
+        dbFile.writePage(page);
+        page.markDirty(false, null);
     }
 
     /** Write all pages of the specified transaction to disk.
      */
-    public synchronized  void flushPages(TransactionId tid) throws IOException {
+    public synchronized void flushPages(TransactionId tid) throws IOException {
         // some code goes here
         // not necessary for lab1|lab2
+
     }
 
     /**
      * Discards a page from the buffer pool.
      * Flushes the page to disk to ensure dirty pages are updated on disk.
      */
-    private synchronized  void evictPage() throws DbException {
+    private synchronized void evictPage() throws DbException {
         // some code goes here
         // not necessary for lab1
-    }
-
+        PageId evictPageId = evict.getEvictPageId();
+        Page page = pageCache.get(evictPageId).getPage();
+        if (page.isDirty() != null) {
+            try {
+                // 事务未提交的页，直接刷盘然后驱逐行了。后面如果要回滚，会直接把before-image写回磁盘
+                flushPage(evictPageId);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        discardPage(evictPageId);
+   }
 }
