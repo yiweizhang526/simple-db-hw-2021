@@ -6,6 +6,7 @@ import simpledb.execution.Predicate;
 import simpledb.execution.SeqScan;
 import simpledb.storage.*;
 import simpledb.transaction.Transaction;
+import simpledb.transaction.TransactionId;
 
 import java.util.HashMap;
 import java.util.Iterator;
@@ -67,6 +68,24 @@ public class TableStats {
      * histograms.
      */
     static final int NUM_HIST_BINS = 100;
+    // 读取每个页的 IO 成本
+    private int ioCostPerPage;
+    // 需要进行数据统计的表
+    private DbFile dbFile;
+    // 表的属性行
+    private TupleDesc tupleDesc;
+    // 表id
+    private int tableid;
+    // 一个表中页的数量
+    private int pagesNum;
+    // 一页中行的数量
+    private int tupleNum;
+    // 一行中段的数量
+    private int fieldNum;
+    // 第 i 个整型字段 和 第 i 个直方图的映射
+    private HashMap<Integer, IntHistogram> integerHashMap;
+    // 第 i 个字符串字段 和 第 i 个直方图的映射
+    private HashMap<Integer, StringHistogram> stringHashMap;
 
     /**
      * Create a new TableStats object, that keeps track of statistics on each
@@ -87,6 +106,118 @@ public class TableStats {
         // necessarily have to (for example) do everything
         // in a single scan of the table.
         // some code goes here
+        // 基本的设置
+        tupleNum = 0;
+        this.tableid = tableid;
+        this.ioCostPerPage = ioCostPerPage;
+        this.dbFile = Database.getCatalog().getDatabaseFile(tableid);
+        this.pagesNum = ((HeapFile) dbFile).numPages();
+        integerHashMap = new HashMap<>();
+        stringHashMap = new HashMap<>();
+
+        // 获取字段数
+        this.tupleDesc = dbFile.getTupleDesc();
+        this.fieldNum = tupleDesc.numFields();
+
+        // 获得行数
+        Type[] types = getTypes(tupleDesc);
+        int[] mins = new int[fieldNum];
+        int[] maxs = new int[fieldNum];
+
+        // 根据表查询行
+        TransactionId tid = new TransactionId();
+        // 查询每一行
+        SeqScan scan = new SeqScan(tid, tableid);
+        // 统计数字字段的最大值和最小值
+        try{
+            // 打开迭代器
+            scan.open();
+            // 获取每个字段的最小值和最大值，一共有 fieldNum个字段
+            for (int i = 0; i < fieldNum; i++) {
+                // 如果是字符串，跳过
+                if(types[i] == Type.STRING_TYPE){
+                    continue;
+                }
+                int min = Integer.MAX_VALUE;
+                int max = Integer.MIN_VALUE;
+                while(scan.hasNext()){
+                    if(i == 0){
+                        tupleNum++;
+                    }
+                    Tuple tuple = scan.next();
+                    IntField field = (IntField) tuple.getField(i);
+                    int val = field.getValue();
+                    max = Math.max(val, max);
+                    min = Math.min(val, min);
+                }
+                // 迭代器重置
+                scan.rewind();
+                mins[i] = min;
+                maxs[i] = max;
+            }
+        }catch (Exception e){
+            e.printStackTrace();
+        }finally {
+            scan.close();
+        }
+
+        // 写入缓存map中
+        for (int i = 0; i < fieldNum; i++) {
+            // 如果是整数，创立整数直方图
+            if(types[i] == Type.INT_TYPE){
+                integerHashMap.put(i, new IntHistogram(NUM_HIST_BINS, mins[i], maxs[i]));
+            }
+            else{
+                stringHashMap.put(i, new StringHistogram(NUM_HIST_BINS));
+            }
+        }
+
+        // 把相应的值填入直方图
+        addValueToHist();
+    }
+
+    /**
+     * 获取相应的类型
+     * */
+    private Type[] getTypes(TupleDesc td){
+        int numField = td.numFields();
+        Type[] types = new Type[numField];
+        for (int i = 0; i < numField; i++) {
+            Type t = td.getFieldType(i);
+            types[i] = t;
+        }
+        return types;
+    }
+
+    /**
+     * 把相应的值填入直方图
+     * */
+    private void addValueToHist(){
+        TransactionId tid = new TransactionId();
+        SeqScan scan = new SeqScan(tid, tableid);
+        try{
+            // 打开迭代器
+            scan.open();
+            // 获取每行的各个字段值写入
+            while(scan.hasNext()){
+                Tuple tuple = scan.next();
+                // 遍历每个字段
+                for (int i = 0; i < fieldNum; i++) {
+                    Field field = tuple.getField(i);
+                    // 判断类型
+                    if(field.getType() == Type.INT_TYPE){
+                        integerHashMap.get(i).addValue(((IntField) field).getValue());
+                    }
+                    else{
+                        stringHashMap.get(i).addValue(((StringField) field).getValue());
+                    }
+                }
+            }
+        }catch (Exception e){
+            e.printStackTrace();
+        }finally {
+            scan.close();
+        }
     }
 
     /**
@@ -103,7 +234,7 @@ public class TableStats {
      */
     public double estimateScanCost() {
         // some code goes here
-        return 0;
+        return pagesNum * ioCostPerPage;
     }
 
     /**
@@ -117,7 +248,9 @@ public class TableStats {
      */
     public int estimateTableCardinality(double selectivityFactor) {
         // some code goes here
-        return 0;
+        // 选择因子 * 行的数量，得出来应该选择多少行
+        double cardinality = selectivityFactor * tupleNum;
+        return (int) cardinality;
     }
 
     /**
@@ -132,7 +265,12 @@ public class TableStats {
      * */
     public double avgSelectivity(int field, Predicate.Op op) {
         // some code goes here
-        return 1.0;
+        if(tupleDesc.getFieldType(field) == Type.INT_TYPE){
+            return integerHashMap.get(field).avgSelectivity();
+        }
+        else{
+            return stringHashMap.get(field).avgSelectivity();
+        }
     }
 
     /**
@@ -150,7 +288,13 @@ public class TableStats {
      */
     public double estimateSelectivity(int field, Predicate.Op op, Field constant) {
         // some code goes here
-        return 1.0;
+        // 判断类型
+        if(tupleDesc.getFieldType(field) == Type.INT_TYPE){
+            return integerHashMap.get(field).estimateSelectivity(op, ((IntField)constant).getValue());
+        }
+        else{
+            return stringHashMap.get(field).estimateSelectivity(op, ((StringField)constant).getValue());
+        }
     }
 
     /**
@@ -158,7 +302,7 @@ public class TableStats {
      * */
     public int totalTuples() {
         // some code goes here
-        return 0;
+        return tupleNum;
     }
 
 }
