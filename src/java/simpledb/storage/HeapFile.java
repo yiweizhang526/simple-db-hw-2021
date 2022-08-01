@@ -139,6 +139,12 @@ public class HeapFile implements DbFile {
             HeapPageId pageId = new HeapPageId(this.getId(), i); // 这里pageId为什么要new出来？？？
             HeapPage page = (HeapPage) Database.getBufferPool().getPage(tid, pageId, Permissions.READ_WRITE);
             if (page.getNumEmptySlots() == 0) {
+                // 释放页锁
+                // 在其他情况下，在事务结束前释放锁可能是有用的。例如，你可以在扫描页面找到空槽后释放一个共享锁
+                // 寻找一个可以插入元组的空槽。大多数实现都会扫描页面，寻找一个空槽，并且需要一个READ_ONLY锁来完成这个工作。
+                // 然而，令人惊讶的是，如果一个事务t发现页面p上没有空槽，t可以立即释放p上的锁。
+                // 虽然这显然与两阶段锁的规则相矛盾，但它是可以的，因为t没有使用页面上的任何数据，这样，一个更新p的并发事务t'不可能影响t的答案或结果。
+                Database.getBufferPool().unsafeReleasePage(tid, page.getId());
                 continue;
             }
             page.insertTuple(t);
