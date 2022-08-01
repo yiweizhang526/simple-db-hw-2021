@@ -78,11 +78,11 @@ public class BufferPool {
                 lockMap.put(pageId, pageLocks);
                 return true;
             }
-            // 获取当前锁的等待队列
+            // 获取当前页的锁队列
             ConcurrentHashMap<TransactionId, PageLock> pageLocks = lockMap.get(pageId);
-            // tid 没有 Page 上的锁
+            // 当前页面上，事务 tid 没有锁
             if (pageLocks.get(tid) == null) {
-                // 如果 当前页已经有锁
+                // 如果 当前页已经有多个锁，这说明多个锁肯定都是share锁
                 if (pageLocks.size() > 1) {
                     // 如果是共享锁，新增获取对象
                     if (requiredType == PageLock.SHARE) {
@@ -97,13 +97,12 @@ public class BufferPool {
                         // tid 需要获取写锁，拒绝
                         return false;
                     }
-                }
-                if (pageLocks.size() == 1) {
-                    // page 上有一个其他事务， 可能是写锁，也可能是读锁
-                    PageLock curLock = null;
-                    for (PageLock lock : pageLocks.values()) {
-                        curLock = lock;
-                    }
+                } else if (pageLocks.size() == 1) {
+                    // 如果 当前页仅有一个锁，那么可能是share锁或exclusive锁
+                    PageLock curLock = (PageLock) pageLocks.values().toArray()[0];
+//                    for (PageLock lock : pageLocks.values()) {
+//                        curLock = lock;
+//                    }
                     if (curLock.getType() == PageLock.SHARE) {
                         // 如果请求的锁也是读锁
                         if (requiredType == PageLock.SHARE) {
@@ -125,11 +124,10 @@ public class BufferPool {
                         return false;
                     }
                 }
-            }
-            // 当前事务持有 Page 锁
-            else if (pageLocks.get(tid) != null) {
+            } else {
+                // 当前页面上，事务 tid 有锁
                 PageLock pageLock = pageLocks.get(tid);
-                // 事务上是写锁
+                // 事务上是读锁
                 if (pageLock.getType() == PageLock.SHARE) {
                     // 新请求的是读锁
                     if (requiredType == PageLock.SHARE) {
@@ -143,10 +141,8 @@ public class BufferPool {
                             pageLock.setType(PageLock.EXCLUSIVE);
                             pageLocks.put(tid, pageLock);
                             return true;
-                        }
-                        // 大于一个锁，说明有其他事务有共享锁
-                        else if (pageLocks.size() > 1) {
-                            // 不能进行锁的升级
+                        } else {
+                        // 大于一个锁，说明有其他事务有共享锁，不能进行锁的升级
                             return false;
                         }
                     }
