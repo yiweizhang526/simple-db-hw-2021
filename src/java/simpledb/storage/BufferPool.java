@@ -188,7 +188,7 @@ public class BufferPool {
         /**
          * 完成事务后释放所有锁
          */
-        public synchronized void completeTranslation(TransactionId tid) {
+        public synchronized void completeTransaction(TransactionId tid) {
             // 遍历所有的页，如果对应事务持有锁就会释放
             for (PageId pageId : lockMap.keySet()) {
                 releaseLock(tid, pageId);
@@ -299,6 +299,7 @@ public class BufferPool {
     public void transactionComplete(TransactionId tid) {
         // some code goes here
         // not necessary for lab1|lab2
+        transactionComplete(tid, true);
     }
 
     /** Return true if the specified transaction has a lock on the specified page */
@@ -318,6 +319,22 @@ public class BufferPool {
     public void transactionComplete(TransactionId tid, boolean commit) {
         // some code goes here
         // not necessary for lab1|lab2
+        // 如果成功提交
+        if(commit){
+            // 刷新页面
+            try{
+                flushPages(tid);
+            }catch (IOException e){
+                e.printStackTrace();
+            }
+        }
+        // 如果提交失败，回滚
+        else{
+            restorePages(tid);
+        }
+        // 事务完成
+        lockManager.completeTransaction(tid);
+
     }
 
     /**
@@ -451,6 +468,12 @@ public class BufferPool {
     public synchronized void flushPages(TransactionId tid) throws IOException {
         // some code goes here
         // not necessary for lab1|lab2
+        for (Map.Entry<PageId, LRUStrategy.LinkedNode> entry : pageCache.entrySet()) {
+            Page page = entry.getValue().getPage();
+            if (tid.equals(page.isDirty())) {   // 判断是否是脏页
+                flushPage(page.getId());    // 脏页刷新
+            }
+        }
 
     }
 
@@ -461,16 +484,72 @@ public class BufferPool {
     private synchronized void evictPage() throws DbException {
         // some code goes here
         // not necessary for lab1
-        PageId evictPageId = evict.getEvictPageId();
-        Page page = pageCache.get(evictPageId).getPage();
-        if (page.isDirty() != null) {
-            try {
-                // 事务未提交的页，直接刷盘然后驱逐行了。后面如果要回滚，会直接把before-image写回磁盘
-                flushPage(evictPageId);
-            } catch (IOException e) {
-                e.printStackTrace();
+//        PageId evictPageId = evict.getEvictPageId();
+//        Page page = pageCache.get(evictPageId).getPage();
+//        if (page.isDirty() != null) {
+//            try {
+//                flushPage(evictPageId);
+//            } catch (IOException e) {
+//                e.printStackTrace();
+//            }
+//        }
+//        discardPage(evictPageId);
+
+        // 一个事务的修改只有在它提交之后才会被写入磁盘。
+        // 这意味着我们可以通过丢弃脏页并从磁盘重读来中止一个事务。
+        // 因此，我们必须不驱逐脏页。这个策略被称为NO STEAL。
+        //
+        // 你将需要修改BufferPool中的evictPage方法。
+        // 特别是，它必须永远不驱逐一个脏页。如果你的驱逐策略倾向于驱逐一个脏页，你将不得不找到一种方法来驱逐一个替代页。
+        // 在缓冲池中的所有页面都是脏的情况下，你应该抛出一个DbException。
+        // 如果你的驱逐策略驱逐了一个干净的页面，要注意事务可能已经持有被驱逐的页面的任何锁，并在你的实现中适当地处理它们
+        PageId evictPageId;
+        Page page;
+        boolean isAllDirty = true;
+        for (int i=0; i < pageCache.size(); i++) {
+            // 获取淘汰页的ID 从队尾一个个取出，直到取到非脏页
+            evictPageId = evict.getEvictPageId();
+            // 获取淘汰的页
+            page = pageCache.get(evictPageId).getPage();
+            // 判断是否脏页
+            if (page.isDirty() != null) {
+                // 脏页放回去，放到队头了
+                // 如果加了日志之后，可以刷脏页了不？事务未提交不能，把页刷到磁盘，redo日志好像可以
+                evict.moveToHead(pageCache.get(evictPageId));
+            } else {
+                isAllDirty = false;
+                // 刷盘，并删除页面
+                try {
+                    flushPage(evictPageId);
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+                discardPage(evictPageId);
+                break;
             }
         }
-        discardPage(evictPageId);
+        if (isAllDirty) {throw new DbException("All page are dirty page.");}
    }
+
+   public synchronized void restorePages(TransactionId tid) {
+       // 遍历缓存中的所有页面，看是否是当前事务修改的页面
+       for(LRUStrategy.LinkedNode node : pageCache.values()){
+           PageId pageId = node.getPageId();
+           Page page = node.getPage();
+           // 如果脏页的 事务id 相同
+           if (tid.equals(page.isDirty())){
+               int tableId = pageId.getTableId();
+               // 获取现有的表
+               DbFile table = Database.getCatalog().getDatabaseFile(tableId);
+               // 读取当前的页面
+               Page pageFromDisk = table.readPage(pageId);
+
+               // 写回内存
+               node.setPage(pageFromDisk);
+               pageCache.put(pageId, node);
+               evict.moveToHead(node);
+           }
+       }
+   }
+
 }
