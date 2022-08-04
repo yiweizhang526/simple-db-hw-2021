@@ -365,10 +365,21 @@ public class BufferPool {
             if(pageCache.size() > numPages){
                 evictPage();
             }
-            // 获取节点，此时的页一定已经在缓存了，因为刚刚被修改的时候就已经放入缓存了
-            LRUStrategy.LinkedNode node = pageCache.get(page.getId());
-            // 更新新的页内容
-            node.setPage(page);
+            // 获取节点，此时的页一定已经在缓存了，因为刚刚被修改的时候就已经放入缓存了 --- 错，有可能新增页面
+            // 如果缓存中有当前节点，则更新，如果没有当前节点，则新建放入缓存
+            LRUStrategy.LinkedNode node;
+            if (pageCache.containsKey(page.getId())) {
+                node = pageCache.get(page.getId());
+                // 更新新的页内容
+                node.setPage(page);
+            } else {
+                if (pageCache.size() >= numPages) {
+                    evictPage();
+                }
+                node = new LRUStrategy.LinkedNode(page.getId(), page);
+                evict.addToHead(node);
+            }
+            // 更新到缓存
             pageCache.put(page.getId(), node);
             page.markDirty(true, tid);
         }
