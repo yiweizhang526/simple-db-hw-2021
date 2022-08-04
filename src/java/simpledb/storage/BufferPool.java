@@ -356,11 +356,11 @@ public class BufferPool {
         throws DbException, IOException, TransactionAbortedException {
         // some code goes here
         // not necessary for lab1
-        HeapFile heapFile = (HeapFile) Database.getCatalog().getDatabaseFile(tableId);
-        if (heapFile == null) {
+        DbFile dbFile = (DbFile) Database.getCatalog().getDatabaseFile(tableId);
+        if (dbFile == null) {
             throw new DbException("BufferPool.insertTuple()中 tableId : " + tableId + " 的表不存在");
         }
-        for (Page page: heapFile.insertTuple(tid, t)) {
+        for (Page page: dbFile.insertTuple(tid, t)) {
             // 如果缓存池已满，执行淘汰策略
             if(pageCache.size() > numPages){
                 evictPage();
@@ -391,11 +391,11 @@ public class BufferPool {
         throws DbException, IOException, TransactionAbortedException {
         // some code goes here
         // not necessary for lab1
-        HeapFile heapFile = (HeapFile) Database.getCatalog().getDatabaseFile(t.getRecordId().getPageId().getTableId());
-        if (heapFile == null) {
-            throw new DbException("BufferPool.deleteTuple()中 tableId : " + t.getRecordId().getPageId().getTableId() + " 的表不存在");
+        DbFile dbFile = (DbFile) Database.getCatalog().getDatabaseFile(t.getRecordId().getPageId().getTableId());
+        if (dbFile == null) {
+            throw new DbException("BufferPool.deleteTuple() tableId : " + t.getRecordId().getPageId().getTableId() + " 的表不存在");
         }
-        for (Page page : heapFile.deleteTuple(tid, t)) {
+        for (Page page : dbFile.deleteTuple(tid, t)) {
             // 获取节点，此时的页一定已经在缓存了，因为刚刚被修改的时候就已经放入缓存了
             LRUStrategy.LinkedNode node = pageCache.get(page.getId());
             // 更新新的页内容
@@ -433,7 +433,9 @@ public class BufferPool {
     public synchronized void discardPage(PageId pid) {
         // some code goes here
         // not necessary for lab1
-        pageCache.remove(pid);
+        if (pageCache.containsKey(pid)) {
+            pageCache.remove(pid);
+        }
     }
 
     /**
