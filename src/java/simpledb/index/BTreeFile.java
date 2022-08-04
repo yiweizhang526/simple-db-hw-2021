@@ -188,7 +188,28 @@ public class BTreeFile implements DbFile {
                                        Field f)
 					throws DbException, TransactionAbortedException {
 		// some code goes here
-        return null;
+		// 获页面类别
+		int type = pid.pgcateg();
+		// 叶子节点
+		if(type == BTreePageId.LEAF){
+			return (BTreeLeafPage) getPage(tid, dirtypages, pid, perm);
+		}
+		// 锁定路径上的所有内部节点，以READ_ONLY锁
+		BTreeInternalPage internalPage = (BTreeInternalPage) getPage(tid, dirtypages, pid, Permissions.READ_ONLY);
+		Iterator<BTreeEntry> it = internalPage.iterator();
+		BTreeEntry entry = null;
+		while(it.hasNext()){
+			entry = it.next();
+			// 如果要搜索的字段为空，找到最左节点(用于迭代器)
+			if(f == null){
+				return findLeafPage(tid, dirtypages, entry.getLeftChild(), perm, f);
+			}
+			// 如果找到的节点相等，返回
+			if(entry.getKey().compare(Op.GREATER_THAN_OR_EQ, f)){
+				return findLeafPage(tid, dirtypages, entry.getLeftChild(), perm, f);
+			}
+		}
+		return findLeafPage(tid, dirtypages, entry.getRightChild(), perm, f);
 	}
 	
 	/**
