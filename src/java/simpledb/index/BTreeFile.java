@@ -260,8 +260,60 @@ public class BTreeFile implements DbFile {
 		// the new entry.  getParentWithEmtpySlots() will be useful here.  Don't forget to update
 		// the sibling pointers of all the affected leaf pages.  Return the page into which a 
 		// tuple with the given key field should be inserted.
-        return null;
-		
+		// 1. 获取空白的页面作为新的右页面 (叶子页面)
+		BTreeLeafPage newRightPage = (BTreeLeafPage)getEmptyPage(tid, dirtypages, BTreePageId.LEAF);
+
+		// 2. 插入当前的tuple，分割一半节点给右节点
+		// 获取反向迭代器
+		int tupleNum = page.getNumTuples();
+		Iterator<Tuple> it = page.reverseIterator();
+		for (int i = 0; i < tupleNum / 2; i++) {
+			Tuple tuple = it.next();
+			// 原页面删除
+			page.deleteTuple(tuple);
+			// 写入新页面
+			newRightPage.insertTuple(tuple);
+		}
+
+		// 3. 如果当前 page 有右兄弟，连接右兄弟
+		BTreePageId oldRightPageId = page.getRightSiblingId();
+		// 获取页面
+		BTreeLeafPage oldRightPage = oldRightPageId == null ? null : (BTreeLeafPage) getPage(tid, dirtypages, oldRightPageId, Permissions.READ_ONLY);
+		if(oldRightPage != null){
+			// 连接
+			oldRightPage.setLeftSiblingId(newRightPage.getId());
+			newRightPage.setRightSiblingId(oldRightPageId);
+			// 放入脏页缓存
+			dirtypages.put(oldRightPageId, oldRightPage);
+		}
+
+		// 4. 分裂节点连接
+		page.setRightSiblingId(newRightPage.getId());
+		newRightPage.setLeftSiblingId(page.getId());
+		// 放入脏页缓存
+		dirtypages.put(page.getId(), page);
+		dirtypages.put(newRightPage.getId(), newRightPage);
+
+		// 5. 获取原节点的内部节点
+		BTreeInternalPage parent = getParentWithEmptySlots(tid, dirtypages, page.getParentId(), field);
+		// 右节点的第一个节点作为要挤入父节点的新内部节点值
+		Field mid = newRightPage.iterator().next().getField(keyField);
+		// 创建新的内部节点 - 注意在这里已经设置了由parent指向左右节点的指针
+		BTreeEntry entry = new BTreeEntry(mid, page.getId(), newRightPage.getId());
+		parent.insertEntry(entry);
+		// 放入脏页缓存
+		dirtypages.put(parent.getId(), parent);
+
+		// 6. 这里是更新page 和 newRightPage的父指针
+		updateParentPointers(tid, dirtypages, parent);
+
+		// 7. 返回 field 所在的页
+		// 如果当前值大于等于中点，说明在右边节点
+		if(field.compare(Op.GREATER_THAN_OR_EQ, mid)){
+			return newRightPage;
+		}
+		// 否则在左边节点，也就是原节点
+		return page;
 	}
 	
 	/**
@@ -298,7 +350,44 @@ public class BTreeFile implements DbFile {
 		// the parent pointers of all the children moving to the new page.  updateParentPointers()
 		// will be useful here.  Return the page into which an entry with the given key field
 		// should be inserted.
-		return null;
+		// 1. 获取空白页面 (内部节点)
+		BTreeInternalPage newRightPage = (BTreeInternalPage) getEmptyPage(tid, dirtypages, BTreePageId.INTERNAL);
+
+		// 2. 拆分当前节点
+		// 获取反向迭代器
+		Iterator<BTreeEntry> iterator = page.reverseIterator();
+		int tupleNum = page.getNumEntries();
+		// 一半的节点移动到右节点
+		for (int i = 0; i < tupleNum / 2 ; i++) {
+			BTreeEntry entry = iterator.next();
+			page.deleteKeyAndRightChild(entry);
+			newRightPage.insertEntry(entry);
+		}
+
+		// 3. 抽出中间的内部节点
+		BTreeEntry mid = iterator.next();
+		// 左页面删除当前节点
+		page.deleteKeyAndRightChild(mid);
+		mid.setLeftChild(page.getId());
+		mid.setRightChild(newRightPage.getId());
+		BTreeInternalPage parent = getParentWithEmptySlots(tid, dirtypages, page.getParentId(), mid.getKey());
+		parent.insertEntry(mid);
+
+		// 4. 写入脏页缓存
+		dirtypages.put(page.getId(), page);
+		dirtypages.put(newRightPage.getId(), newRightPage);
+		dirtypages.put(parent.getId(), parent);
+		updateParentPointers(tid, dirtypages, parent);
+		updateParentPointers(tid, dirtypages, page);
+		updateParentPointers(tid, dirtypages, newRightPage);
+
+		// 5. 返回 field 所在的页
+		// 如果当前值大于等于中点，说明在右边节点
+		if(field.compare(Op.GREATER_THAN_OR_EQ, mid.getKey())){
+			return newRightPage;
+		}
+		// 否则在左边节点，也就是原节点
+		return page;
 	}
 	
 	/**
@@ -372,7 +461,6 @@ public class BTreeFile implements DbFile {
 			p = (BTreePage) getPage(tid, dirtypages, child, Permissions.READ_WRITE);
 			p.setParentId(pid);
 		}
-
 	}
 	
 	/**
