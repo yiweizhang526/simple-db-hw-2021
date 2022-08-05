@@ -60,7 +60,7 @@ CHECKPOINT
 
 <li> ABORT, COMMIT, and BEGIN records contain no additional data
 
-<li>UPDATE RECORDS consist of two entries, a before image and an
+<li> UPDATE RECORDS consist of two entries, a before image and an
 after image.  These images are serialized Page objects, and can be
 accessed with the LogFile.readPageData() and LogFile.writePageData()
 methods.  See LogFile.print() for an example.
@@ -196,7 +196,7 @@ public class LogFile {
 
         @see Page#getBeforeImage
     */
-    public  synchronized void logWrite(TransactionId tid, Page before,
+    public synchronized void logWrite(TransactionId tid, Page before,
                                        Page after)
         throws IOException  {
         Debug.log("WRITE, offset = " + raf.getFilePointer());
@@ -460,6 +460,59 @@ public class LogFile {
             synchronized(this) {
                 preAppend();
                 // some code goes here
+                Long firstLogRecord = tidToFirstLogRecord.get(tid.getId());
+                //移动到日志开始的地方
+                raf.seek(firstLogRecord);
+                Set<PageId> set = new HashSet<>();
+                while (true) {
+                    try {
+                        //Each log record begins with an integer type and a long integer
+                        //transaction id. 每条日志记录都以整数类型和长整数事务 id 开头。
+                        int type = raf.readInt();   // 日志类型
+                        long txid = raf.readLong(); // 事务ID
+                        switch (type) {
+                            case UPDATE_RECORD:
+                                //UPDATE RECORDS consist of two entries, a before image and an
+                                //after image.  These images are serialized Page objects, and can be
+                                //accessed with the LogFile.readPageData() and LogFile.writePageData()
+                                //methods.  See LogFile.print() for an example.
+                                // 更新记录由两个条目组成，一个前图像和一个后图像。
+                                // 这些图像是序列化的 Page 对象，
+                                // 可以使用 LogFile.readPageData() 和 LogFile.writePageData() 方法访问。
+                                // 有关示例，请参见 LogFile.print()。
+                                Page beforeImage = readPageData(raf);
+                                Page afterImage = readPageData(raf);
+                                PageId pageId = beforeImage.getId();
+                                if (txid == tid.getId() && !set.contains(pageId)) {
+                                    set.add(pageId);
+                                    Database.getBufferPool().discardPage(pageId);   // 删除新页
+                                    Database.getCatalog().getDatabaseFile(pageId.getTableId()).writePage(beforeImage);  // 回滚旧页
+                                }
+                                break;
+                            case CHECKPOINT_RECORD: // txid = -1
+                                //CHECKPOINT records consist of active transactions at the time
+                                //the checkpoint was taken and their first log record on disk.  The format
+                                //of the record is an integer count of the number of transactions, as well
+                                //as a long integer transaction id and a long integer first record offset
+                                //for each active transaction.
+                                // CHECKPOINT 记录由检查点发生时的活动事务和它们在磁盘上的第一条日志记录组成。
+                                // 记录的格式是事务数的整数计数，以及每个活动事务的长整数事务 id 和长整数首记录偏移量。
+                                int txCnt = raf.readInt();  // 事务ID列表的大小
+                                while (txCnt-- > 0) {
+                                    raf.readLong(); // tid
+                                    raf.readLong(); // tid对应的offset
+                                }
+                                break;
+                            default:
+                                //others
+                                break;
+                        }
+                        //Each log record ends with a long integer file offset representing the position in the log file where the record began.
+                        raf.readLong(); // 开始时的currentOffset
+                    } catch (EOFException e) {  // 读到文件末尾了
+                        break;
+                    }
+                }
             }
         }
     }
@@ -487,6 +540,72 @@ public class LogFile {
             synchronized (this) {
                 recoveryUndecided = false;
                 // some code goes here
+                raf = new RandomAccessFile(logFile, "rw");
+                //已提交的事务id集合
+                Set<Long> committedId = new HashSet<>();
+                //存放事务id对应的beforePage和afterPage
+                Map<Long, List<Page>> beforePages = new HashMap<>();
+                Map<Long, List<Page>> afterPages = new HashMap<>();
+                //获取checkpoint
+                Long checkpoint = raf.readLong();
+                if (checkpoint != -1) {
+//                    raf.seek(checkpoint); // 好像没必要这个，因为checkpoint之后会截断日志，整个文件都是没刷到磁盘的日志
+                }
+                while (true) {
+                    try {
+                        int type = raf.readInt();
+                        long txid = raf.readLong();
+                        switch (type) {
+                            case UPDATE_RECORD:
+                                Page beforeImage = readPageData(raf);
+                                Page afterImage = readPageData(raf);
+                                List<Page> l1 = beforePages.getOrDefault(txid, new ArrayList<>());
+                                l1.add(beforeImage);
+                                beforePages.put(txid, l1);
+                                List<Page> l2 = afterPages.getOrDefault(txid, new ArrayList<>());
+                                l2.add(afterImage);
+                                afterPages.put(txid, l2);
+                                break;
+                            case COMMIT_RECORD:
+                                committedId.add(txid);
+                                break;
+                            case CHECKPOINT_RECORD: // 这个都是跳过的，没有，只是记录checkpoint了然后截断文件
+                                int numTxs = raf.readInt();
+                                while (numTxs -- > 0) {
+                                    raf.readLong();
+                                    raf.readLong();
+                                }
+                                break;
+                            default:
+                                break;
+                        }
+                        //end
+                        raf.readLong();
+
+                    } catch (EOFException e) {
+                        break;
+                    }
+                }
+
+                //处理未提交事务，直接写before-image
+                for (long txid :beforePages.keySet()) {
+                    if (!committedId.contains(txid)) {
+                        List<Page> pages = beforePages.get(txid);
+                        for (Page p : pages) {
+                            Database.getCatalog().getDatabaseFile(p.getId().getTableId()).writePage(p);
+                        }
+                    }
+                }
+
+                //处理已提交事务，直接写after-image
+                for (long txid : committedId) {
+                    if (afterPages.containsKey(txid)) {
+                        List<Page> pages = afterPages.get(txid);
+                        for (Page page : pages) {
+                            Database.getCatalog().getDatabaseFile(page.getId().getTableId()).writePage(page);
+                        }
+                    }
+                }
             }
          }
     }

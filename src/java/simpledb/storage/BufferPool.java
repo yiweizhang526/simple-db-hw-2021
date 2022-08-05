@@ -463,6 +463,7 @@ public class BufferPool {
 
         // append an update record to the log, with a before-image and after-image
         TransactionId dirtyTid = page.isDirty();    // 脏的页，返回该页的事务id
+        // 这里是lab6添加的
         if (dirtyTid != null) {
             // 脏页刷盘前把日志写入磁盘先    // 反正页刷盘时crash，先把日志刷了先
             Database.getLogFile().logWrite(dirtyTid, page.getBeforeImage(), page); // UPDATE记录的操作，保存before-image 和 after-image
@@ -483,11 +484,19 @@ public class BufferPool {
         // not necessary for lab1|lab2
         for (Map.Entry<PageId, LRUStrategy.LinkedNode> entry : pageCache.entrySet()) {
             Page page = entry.getValue().getPage();
+            // lab6
+            // 注意：我们不能在flushPage()中直接调用setBeforeImage()，
+            // 因为即使事务没有提交，flushPage()也可能被调用。
+            // 你的BufferPool.transactionComplete()为每一个被提交的事务搅乱的页面调用flushPage()。
+            // 对于每一个这样的页面，在你刷新页面之后，添加一个对p.setBeforeImage()的调用。
+            // (这是事务提交以后把当前页当成beforeImage，可以拿来rollback，一定要提交后才能作为beforeImage)
+            // flushPage不一定是事务提交的刷盘，flushPages才是！！！！！！！！！！！
+            // 注意BufferPool满的时候也会flushPage 这是STEAL策略，而lab4中实现的是NO-STEAL策略
+            page.setBeforeImage();  // 设置oldData    // 这个事务要提交了，把这个页的before-image设为提交时的镜像
             if (tid.equals(page.isDirty())) {   // 判断是否是脏页
                 flushPage(page.getId());    // 脏页刷新
             }
         }
-
     }
 
     /**
